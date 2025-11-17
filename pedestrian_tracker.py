@@ -47,7 +47,7 @@ class PedestrianTracker:
         results = self.yolo_model(frame, 
                                 conf=self.conf_thresh,
                                 iou=self.iou_thresh,
-                                imgsz=320,
+                                imgsz=self.imgsz,
                                 device='cpu',
                                 half=False,
                                 verbose=False)

@@ -42,7 +42,12 @@ class ByteTrack:
     
     def _linear_assignment(self, cost_matrix, thresh):
         if cost_matrix.size == 0:
-            return np.empty((0, 2), dtype=int), tuple(range(cost_matrix.shape[0])), tuple(range(cost_matrix.shape[1]))
+            # Bezpecne ziskanie shape pred pristupom
+            if len(cost_matrix.shape) >= 2:
+                n_rows, n_cols = cost_matrix.shape[0], cost_matrix.shape[1]
+            else:
+                n_rows, n_cols = 0, 0
+            return np.empty((0, 2), dtype=int), tuple(range(n_rows)), tuple(range(n_cols))
         
         cost_matrix[cost_matrix > thresh] = thresh + 1e-4
         row_indices, col_indices = linear_sum_assignment(cost_matrix)
@@ -51,12 +56,16 @@ class ByteTrack:
         unmatched_a = []
         unmatched_b = []
         
-        for d, cost in enumerate(cost_matrix[row_indices, col_indices]):
-            if cost <= thresh:
-                matches.append([row_indices[d], col_indices[d]])
-            else:
-                unmatched_a.append(row_indices[d])
-                unmatched_b.append(col_indices[d])
+        # Kontrola pred indexovanim
+        if len(row_indices) > 0 and len(col_indices) > 0:
+            for d in range(len(row_indices)):
+                if d < len(row_indices) and d < len(col_indices):
+                    cost = cost_matrix[row_indices[d], col_indices[d]]
+                    if cost <= thresh:
+                        matches.append([row_indices[d], col_indices[d]])
+                    else:
+                        unmatched_a.append(row_indices[d])
+                        unmatched_b.append(col_indices[d])
         
         unmatched_a += [i for i in range(cost_matrix.shape[0]) if i not in row_indices]
         unmatched_b += [i for i in range(cost_matrix.shape[1]) if i not in col_indices]
@@ -65,7 +74,8 @@ class ByteTrack:
     
     def _associate_detections_to_trackers(self, detections, trackers, iou_threshold=0.5):
         if len(trackers) == 0:
-            return np.empty((0, 2), dtype=int), np.arange(len(detections)), np.empty((0, 5), dtype=int)
+            # Oprava: unmatched_trackers by mal byt prazdny tuple, nie np.empty
+            return np.empty((0, 2), dtype=int), np.arange(len(detections)), tuple()
         
         iou_matrix = np.zeros((len(detections), len(trackers)), dtype=np.float32)
         
@@ -136,9 +146,13 @@ class ByteTrack:
             detections = np.array(detections)
         
         # Rozdeluje detekcie podla confidence thresholdu
-        high_conf_detections = detections[detections[:, 4] >= self.high_thresh]
-        low_conf_detections = detections[detections[:, 4] >= self.track_thresh]
-        low_conf_detections = low_conf_detections[low_conf_detections[:, 4] < self.high_thresh]
+        if len(detections) > 0:
+            high_conf_detections = detections[detections[:, 4] >= self.high_thresh]
+            low_conf_detections = detections[detections[:, 4] >= self.track_thresh]
+            low_conf_detections = low_conf_detections[low_conf_detections[:, 4] < self.high_thresh]
+        else:
+            high_conf_detections = np.empty((0, 6))
+            low_conf_detections = np.empty((0, 6))
         
         # Predikuje pozicie existujucich trackov
         for track_id, track in self.tracked_tracks.items():
@@ -161,11 +175,24 @@ class ByteTrack:
             tracked_track_ids = list(self.tracked_tracks.keys())
             for match in matches:
                 det_idx, trk_idx = match
-                if trk_idx < len(tracked_track_ids):
+                # Kontrola oboch indexov pred pouzitim
+                if (trk_idx < len(tracked_track_ids) and 
+                    det_idx < len(high_conf_detections) and 
+                    det_idx >= 0):
                     track_id = tracked_track_ids[trk_idx]
                     self._update_track(self.tracked_tracks[track_id], high_conf_detections[det_idx])
             
-            high_conf_detections = high_conf_detections[unmatched_dets]
+            # Validacia indexov pred indexovanim
+            if len(unmatched_dets) > 0 and len(high_conf_detections) > 0:
+                # Konvertuj tuple na numpy array a filtruj neplatne indexy
+                unmatched_dets = np.array(unmatched_dets)
+                valid_indices = (unmatched_dets >= 0) & (unmatched_dets < len(high_conf_detections))
+                if np.any(valid_indices):
+                    high_conf_detections = high_conf_detections[unmatched_dets[valid_indices]]
+                else:
+                    high_conf_detections = np.empty((0, 6))
+            elif len(unmatched_dets) == 0:
+                high_conf_detections = np.empty((0, 6))
             
             for trk_idx in unmatched_trks:
                 if trk_idx < len(tracked_track_ids):
@@ -188,7 +215,10 @@ class ByteTrack:
             
             for match in matches:
                 det_idx, trk_idx = match
-                if trk_idx < len(lost_track_ids):
+                # Kontrola oboch indexov pred pouzitim
+                if (trk_idx < len(lost_track_ids) and 
+                    det_idx < len(low_conf_detections) and 
+                    det_idx >= 0):
                     track_id = lost_track_ids[trk_idx]
                     self._update_track(self.lost_tracks[track_id], low_conf_detections[det_idx])
                     self.tracked_tracks[track_id] = self.lost_tracks[track_id]
@@ -199,11 +229,18 @@ class ByteTrack:
             track = self._init_track(det)
             self.tracked_tracks[track['id']] = track
         
-        # Odstraňuje predlhe tracky z lost poolu
+        # Odstranuje tracky z lost poolu
         for track_id, track in list(self.lost_tracks.items()):
             if track['time_since_update'] > self.track_buffer:
                 self.removed_tracks[track_id] = track
                 del self.lost_tracks[track_id]
+        
+        # Omedzuje velkost removed_tracks na 100 zaznamov
+        if len(self.removed_tracks) > 100:
+            # Odstrani najstarsie zaznamy
+            keys_to_remove = list(self.removed_tracks.keys())[:-100]
+            for key in keys_to_remove:
+                del self.removed_tracks[key]
         
         # Vracia aktivne tracky
         active_tracks = []

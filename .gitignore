@@ -7,3 +7,4 @@ __pycache__/
 *.zip
 jobs_info.txt
 __pycache__/
+venv/
